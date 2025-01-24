@@ -24,8 +24,10 @@
 
 package common
 
-// IATMatrix - columns are minutes, rows are IATs
-type IATMatrix [][]float64
+// IATArray Hold the IATs of invocations for a particular function. Values in this array tells individual function driver
+// how much time to sleep before firing an invocation. First invocations should be fired right away after the start of
+// experiment, i.e., should typically have a IAT of 0.
+type IATArray []float64
 
 // ProbabilisticDuration used for testing the exponential distribution
 type ProbabilisticDuration []float64
@@ -35,10 +37,11 @@ type RuntimeSpecification struct {
 	Memory  int
 }
 
-type RuntimeSpecificationMatrix [][]RuntimeSpecification
+type RuntimeSpecificationArray []RuntimeSpecification
 
 type FunctionSpecification struct {
-	IAT                  IATMatrix                  `json:"IAT"`
-	RawDuration          ProbabilisticDuration      `json:"RawDuration"`
-	RuntimeSpecification RuntimeSpecificationMatrix `json:"RuntimeSpecification"`
+	IAT                  IATArray                  `json:"IAT"`
+	PerMinuteCount       []int                     `json:"PerMinuteCount"`
+	RawDuration          ProbabilisticDuration     `json:"RawDuration"`
+	RuntimeSpecification RuntimeSpecificationArray `json:"RuntimeSpecification"`
 }

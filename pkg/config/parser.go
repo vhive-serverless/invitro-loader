@@ -69,6 +69,7 @@ type LoaderConfiguration struct {
 	CPULimit           string `json:"CPULimit"`
 	ExperimentDuration int    `json:"ExperimentDuration"`
 	WarmupDuration     int    `json:"WarmupDuration"`
+	PrepullMode        string `json:"PrepullMode"`
 
 	IsPartiallyPanic            bool   `json:"IsPartiallyPanic"`
 	EnableZipkinTracing         bool   `json:"EnableZipkinTracing"`
@@ -79,6 +80,10 @@ type LoaderConfiguration struct {
 	GRPCConnectionTimeoutSeconds int  `json:"GRPCConnectionTimeoutSeconds"`
 	GRPCFunctionTimeoutSeconds   int  `json:"GRPCFunctionTimeoutSeconds"`
 	DAGMode                      bool `json:"DAGMode"`
+	EnableDAGDataset             bool `json:"EnableDAGDataset"`
+	Width                        int  `json:"Width"`
+	Depth                        int  `json:"Depth"`
+	VSwarm                       bool `json:"VSwarm"`
 }
 
 func ReadConfigurationFile(path string) LoaderConfiguration {

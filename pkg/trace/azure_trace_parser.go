@@ -26,10 +26,10 @@ package trace
 
 import (
 	"encoding/csv"
-	"encoding/json"
 	"fmt"
 	"github.com/gocarina/gocsv"
 	"github.com/vhive-serverless/loader/pkg/common"
+	"github.com/vhive-serverless/loader/pkg/generator"
 	"io"
 	"math/rand"
 	"os"
@@ -86,21 +86,13 @@ func createDirigentMetadataMap(metadata *[]common.DirigentMetadata) map[string]*
 	return result
 }
 
-func (p *AzureTraceParser) extractFunctions(
-	invocations *[]common.FunctionInvocationStats,
-	runtime *[]common.FunctionRuntimeStats,
-	memory *[]common.FunctionMemoryStats,
-	dirigentMetadata *[]common.DirigentMetadata) []*common.Function {
-
+func (p *AzureTraceParser) extractFunctions(invocations *[]common.FunctionInvocationStats, runtime *[]common.FunctionRuntimeStats, memory *[]common.FunctionMemoryStats) []*common.Function {
 	var result []*common.Function
 
 	runtimeByHashFunction := createRuntimeMap(runtime)
 	memoryByHashFunction := createMemoryMap(memory)
 
-	var dirigentMetadataByHashFunction map[string]*common.DirigentMetadata
-	if dirigentMetadata != nil {
-		dirigentMetadataByHashFunction = createDirigentMetadataMap(dirigentMetadata)
-	}
+	gen := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	for i := 0; i < len(*invocations); i++ {
 		invocationStats := (*invocations)[i]
@@ -111,10 +103,8 @@ func (p *AzureTraceParser) extractFunctions(
 			InvocationStats: &invocationStats,
 			RuntimeStats:    runtimeByHashFunction[invocationStats.HashFunction],
 			MemoryStats:     memoryByHashFunction[invocationStats.HashFunction],
-		}
 
-		if dirigentMetadata != nil {
-			function.DirigentMetadata = dirigentMetadataByHashFunction[invocationStats.HashFunction]
+			ColdStartBusyLoopMs: generator.ComputeBusyLoopPeriod(generator.GenerateMemorySpec(gen, gen.Float64(), memoryByHashFunction[invocationStats.HashFunction])),
 		}
 
 		result = append(result, function)
@@ -123,18 +113,16 @@ func (p *AzureTraceParser) extractFunctions(
 	return result
 }
 
-func (p *AzureTraceParser) Parse(platform string) []*common.Function {
+func (p *AzureTraceParser) Parse() []*common.Function {
 	invocationPath := p.DirectoryPath + "/invocations.csv"
 	runtimePath := p.DirectoryPath + "/durations.csv"
 	memoryPath := p.DirectoryPath + "/memory.csv"
-	dirigentPath := p.DirectoryPath + "/dirigent.json"
 
 	invocationTrace := parseInvocationTrace(invocationPath, p.duration)
 	runtimeTrace := parseRuntimeTrace(runtimePath)
 	memoryTrace := parseMemoryTrace(memoryPath)
-	dirigentMetadata := parseDirigentMetadata(dirigentPath, platform)
 
-	return p.extractFunctions(invocationTrace, runtimeTrace, memoryTrace, dirigentMetadata)
+	return p.extractFunctions(invocationTrace, runtimeTrace, memoryTrace)
 }
 
 func parseInvocationTrace(traceFile string, traceDuration int) *[]common.FunctionInvocationStats {
@@ -256,26 +244,4 @@ func parseMemoryTrace(traceFile string) *[]common.FunctionMemoryStats {
 	}
 
 	return &memory
-}
-
-func parseDirigentMetadata(traceFile string, platform string) *[]common.DirigentMetadata {
-	if strings.ToLower(platform) != "dirigent" {
-		return nil
-	}
-
-	log.Infof("Parsing Dirigent metadata: %s", traceFile)
-
-	data, err := os.ReadFile(traceFile)
-	if err != nil {
-		log.Error("Failed to read Dirigent trace file.")
-		return nil
-	}
-
-	var metadata []common.DirigentMetadata
-	err = json.Unmarshal(data, &metadata)
-	if err != nil {
-		log.Fatal("Failed to parse trace runtime specification.")
-	}
-
-	return &metadata
 }

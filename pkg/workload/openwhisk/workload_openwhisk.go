@@ -24,13 +24,44 @@
 
 package main
 
+import (
+	"encoding/json"
+	util "github.com/vhive-serverless/loader/pkg/common"
+	"strconv"
+	"time"
+)
+
+type FunctionResponse struct {
+	Status        string `json:"Status"`
+	Function      string `json:"Function"`
+	MachineName   string `json:"MachineName"`
+	ExecutionTime int64  `json:"ExecutionTime"`
+}
+
 func Main(obj map[string]interface{}) map[string]interface{} {
-	msg := "You did not tell me who you are."
-	name, ok := obj["name"].(string)
-	if ok {
-		msg = "Hello, " + name + "!"
-	}
+	requestedCpu, ok := obj["cpu"].(string)
 	result := make(map[string]interface{})
-	result["body"] = `<html><body><h3>` + msg + `</h3></body></html>`
+
+	if !ok {
+		result["body"] = obj
+		return result
+	}
+
+	ts, _ := strconv.Atoi(requestedCpu)
+
+	start := time.Now()
+	timeLeftMilliseconds := uint32(ts)
+
+	util.TraceFunctionExecution(start, uint32(155), timeLeftMilliseconds)
+
+	responseBytes, _ := json.Marshal(FunctionResponse{
+		Status:        "OK",
+		Function:      "",
+		MachineName:   "NYI",
+		ExecutionTime: time.Since(start).Microseconds(),
+	})
+
+	result["body"] = responseBytes
+
 	return result
 }

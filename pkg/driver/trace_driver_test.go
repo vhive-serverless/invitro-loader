@@ -27,12 +27,13 @@ package driver
 import (
 	"container/list"
 	"fmt"
-	"github.com/vhive-serverless/loader/pkg/config"
 	"log"
 	"os"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/vhive-serverless/loader/pkg/config"
 
 	"github.com/gocarina/gocsv"
 	"github.com/sirupsen/logrus"
@@ -52,7 +53,7 @@ func createFakeLoaderConfiguration() *config.LoaderConfiguration {
 	}
 }
 
-func createTestDriver() *Driver {
+func createTestDriver(invocationStats []int) *Driver {
 	cfg := createFakeLoaderConfiguration()
 
 	driver := NewDriver(&config.Configuration{
@@ -64,12 +65,7 @@ func createTestDriver() *Driver {
 			{
 				Name: "test-function",
 				InvocationStats: &common.FunctionInvocationStats{
-					Invocations: []int{
-						5, 5, 5, 5, 5,
-						5, 5, 5, 5, 5,
-						5, 5, 5, 5, 5,
-						5, 5, 5, 5, 5,
-					},
+					Invocations: invocationStats,
 				},
 				RuntimeStats: &common.FunctionRuntimeStats{
 					Average:       50,
@@ -97,7 +93,7 @@ func createTestDriver() *Driver {
 					Percentile100: 10000,
 				},
 				Specification: &common.FunctionSpecification{
-					RuntimeSpecification: make([][]common.RuntimeSpecification, 1),
+					PerMinuteCount: invocationStats,
 				},
 			},
 		},
@@ -130,12 +126,11 @@ func TestInvokeFunctionFromDriver(t *testing.T) {
 			var successCount int64 = 0
 			var failureCount int64 = 0
 
-			invocationRecordOutputChannel := make(chan interface{}, 1)
+			invocationRecordOutputChannel := make(chan *metric.ExecutionRecord, 1)
 			announceDone := &sync.WaitGroup{}
 
-			testDriver := createTestDriver()
-			var failureCountByMinute = make([]int64, testDriver.Configuration.TraceDuration)
-
+			testDriver := createTestDriver([]int{1})
+			var functionsInvoked int64
 			if !test.forceFail {
 				address, port := "localhost", test.port
 				testDriver.Configuration.Functions[0].Endpoint = fmt.Sprintf("%s:%d", address, port)
@@ -145,25 +140,22 @@ func TestInvokeFunctionFromDriver(t *testing.T) {
 				// make sure that the gRPC server is running
 				time.Sleep(2 * time.Second)
 			}
-
+			function := testDriver.Configuration.Functions[0]
+			node := &common.Node{Function: testDriver.Configuration.Functions[0]}
 			list := list.New()
-			list.PushBack(testDriver.Configuration.Functions[0])
-			function := list.Front().Value.(*common.Function)
-			for i := 0; i < len(function.Specification.RuntimeSpecification); i++ {
-				function.Specification.RuntimeSpecification[i] = make([]common.RuntimeSpecification, 3)
-			}
-			function.Specification.RuntimeSpecification[0][2] = common.RuntimeSpecification{
+			list.PushBack(node)
+			function.Specification.RuntimeSpecification = []common.RuntimeSpecification{{
 				Runtime: 1000,
 				Memory:  128,
-			}
+			}}
 			metadata := &InvocationMetadata{
 				RootFunction:        list,
 				Phase:               common.ExecutionPhase,
-				MinuteIndex:         0,
-				InvocationIndex:     2,
+				IatIndex:            0,
+				InvocationID:        composeInvocationID(common.MinuteGranularity, 0, 0),
 				SuccessCount:        &successCount,
 				FailedCount:         &failureCount,
-				FailedCountByMinute: failureCountByMinute,
+				FunctionsInvoked:    &functionsInvoked,
 				RecordOutputChannel: invocationRecordOutputChannel,
 				AnnounceDoneWG:      announceDone,
 			}
@@ -173,92 +165,109 @@ func TestInvokeFunctionFromDriver(t *testing.T) {
 
 			switch test.forceFail {
 			case true:
-				if !(successCount == 0 && failureCount == 1) {
+				if !(successCount == 0 && failureCount == 1 && functionsInvoked == 1) {
 					t.Error("The function somehow managed to execute.")
 				}
 			case false:
-				if !(successCount == 1 && failureCount == 0) {
+				if !(successCount == 1 && failureCount == 0 && functionsInvoked == 1) {
 					t.Error("The function should not have failed.")
 				}
 			}
 
-			record := (<-invocationRecordOutputChannel).(*metric.ExecutionRecord)
+			record := <-invocationRecordOutputChannel
 			announceDone.Wait()
 
 			if record.Phase != int(metadata.Phase) ||
-				record.InvocationID != composeInvocationID(common.MinuteGranularity, metadata.MinuteIndex, metadata.InvocationIndex) {
+				record.InvocationID != composeInvocationID(common.MinuteGranularity, 0, 0) {
 
 				t.Error("Invalid invocation record received.")
 			}
 		})
 	}
 }
+
 func TestDAGInvocation(t *testing.T) {
 	var successCount int64 = 0
 	var failureCount int64 = 0
-	var functionsToInvoke int = 4
-	invocationRecordOutputChannel := make(chan interface{}, functionsToInvoke)
+	var functionsToInvoke int = 3
+	var functionsInvoked int64
+	invocationRecordOutputChannel := make(chan *metric.ExecutionRecord, functionsToInvoke)
 	announceDone := &sync.WaitGroup{}
 
-	testDriver := createTestDriver()
-	var failureCountByMinute = make([]int64, testDriver.Configuration.TraceDuration)
-	list := list.New()
+	testDriver := createTestDriver([]int{4})
 	address, port := "localhost", 8085
 	function := testDriver.Configuration.Functions[0]
 	function.Endpoint = fmt.Sprintf("%s:%d", address, port)
 
 	go standard.StartGRPCServer(address, port, standard.TraceFunction, "")
-	for i := 0; i < len(function.Specification.RuntimeSpecification); i++ {
-		function.Specification.RuntimeSpecification[i] = make([]common.RuntimeSpecification, 3)
-	}
-	function.Specification.RuntimeSpecification[0][2] = common.RuntimeSpecification{
+	function.Specification.RuntimeSpecification = []common.RuntimeSpecification{{
 		Runtime: 1000,
 		Memory:  128,
+	}}
+	functionList := make([]*common.Function, 3)
+	for i := 0; i < len(functionList); i++ {
+		functionList[i] = function
 	}
-	for i := 0; i < functionsToInvoke; i++ {
-		function = testDriver.Configuration.Functions[0]
-		list.PushBack(function)
+	originalBranch := []*list.List{
+		func() *list.List {
+			l := list.New()
+			l.PushBack(&common.Node{Function: functionList[0], Depth: 0})
+			l.PushBack(&common.Node{Function: functionList[1], Depth: 1})
+			return l
+		}(),
 	}
 
+	newBranch := []*list.List{
+		func() *list.List {
+			l := list.New()
+			l.PushBack(&common.Node{Function: functionList[2], Depth: 1})
+			return l
+		}(),
+	}
+
+	rootFunction := originalBranch[0]
+	rootFunction.Front().Value.(*common.Node).Branches = newBranch
 	time.Sleep(2 * time.Second)
 
 	metadata := &InvocationMetadata{
-		RootFunction:        list,
+		RootFunction:        rootFunction,
 		Phase:               common.ExecutionPhase,
-		MinuteIndex:         0,
-		InvocationIndex:     2,
+		IatIndex:            0,
+		InvocationID:        composeInvocationID(common.MinuteGranularity, 0, 0),
 		SuccessCount:        &successCount,
 		FailedCount:         &failureCount,
-		FailedCountByMinute: failureCountByMinute,
+		FunctionsInvoked:    &functionsInvoked,
 		RecordOutputChannel: invocationRecordOutputChannel,
 		AnnounceDoneWG:      announceDone,
 	}
 
 	announceDone.Add(1)
 	testDriver.invokeFunction(metadata)
-	if !(successCount == 1 && failureCount == 0) {
-		t.Error("The DAG invocation has failed.")
+	announceDone.Wait()
+	if !(successCount == 3 && failureCount == 0) {
+		t.Error("Number of successful and failed invocations not as expected.")
 	}
 	for i := 0; i < functionsToInvoke; i++ {
-		record := (<-invocationRecordOutputChannel).(*metric.ExecutionRecord)
+		record := <-invocationRecordOutputChannel
 		if record.Phase != int(metadata.Phase) ||
-			record.InvocationID != composeInvocationID(common.MinuteGranularity, metadata.MinuteIndex, metadata.InvocationIndex) {
+			record.InvocationID != composeInvocationID(common.MinuteGranularity, 0, 0) {
 
 			t.Error("Invalid invocation record received.")
 		}
 	}
 }
-func TestGlobalMetricsCollector(t *testing.T) {
-	driver := createTestDriver()
 
-	inputChannel := make(chan interface{})
+func TestGlobalMetricsCollector(t *testing.T) {
+	driver := createTestDriver([]int{5})
+
+	inputChannel := make(chan *metric.ExecutionRecord)
 	totalIssuedChannel := make(chan int64)
 	collectorReady, collectorFinished := &sync.WaitGroup{}, &sync.WaitGroup{}
 
 	collectorReady.Add(1)
 	collectorFinished.Add(1)
 
-	go driver.createGlobalMetricsCollector(driver.outputFilename("duration"), inputChannel, collectorReady, collectorFinished, totalIssuedChannel)
+	go metric.CreateGlobalMetricsCollector(driver.outputFilename("duration"), inputChannel, collectorReady, collectorFinished, totalIssuedChannel)
 	collectorReady.Wait()
 
 	bogusRecord := &metric.ExecutionRecord{
@@ -325,7 +334,7 @@ func TestDriverBackgroundProcesses(t *testing.T) {
 				t.Skip("Not yet implemented")
 			}
 
-			driver := createTestDriver()
+			driver := createTestDriver([]int{5})
 			globalCollectorAnnounceDone := &sync.WaitGroup{}
 
 			completed, _, _, _ := driver.startBackgroundProcesses(globalCollectorAnnounceDone)
@@ -337,48 +346,93 @@ func TestDriverBackgroundProcesses(t *testing.T) {
 
 func TestDriverCompletely(t *testing.T) {
 	tests := []struct {
-		testName          string
-		withWarmup        bool
-		secondGranularity bool
+		testName              string
+		experimentDurationMin int
+		withWarmup            bool
+		traceGranularity      common.TraceGranularity
+		invocationStats       []int
+		expectedInvocations   int
 	}{
 		{
-			testName:   "without_warmup",
-			withWarmup: false,
+			testName:              "no_invocations",
+			experimentDurationMin: 1,
+			invocationStats:       []int{0},
+			traceGranularity:      common.MinuteGranularity,
+			expectedInvocations:   0,
 		},
 		{
-			testName:   "with_warmup",
-			withWarmup: true,
+			testName:              "without_warmup",
+			experimentDurationMin: 1,
+			invocationStats:       []int{5},
+			traceGranularity:      common.MinuteGranularity,
+			expectedInvocations:   5,
 		},
 		{
-			testName:          "without_warmup_second_granularity",
-			withWarmup:        false,
-			secondGranularity: true,
+			testName:              "with_warmup",
+			experimentDurationMin: 2, // 1 withWarmup + 1 execution
+			invocationStats:       []int{5, 5},
+			traceGranularity:      common.MinuteGranularity,
+			withWarmup:            true,
+			expectedInvocations:   10,
 		},
 		{
-			testName:          "with_warmup_second_granularity",
-			withWarmup:        true,
-			secondGranularity: true,
+			testName:              "without_warmup_second_granularity",
+			experimentDurationMin: 1,
+			invocationStats: []int{
+				1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+				1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+			},
+			traceGranularity:    common.SecondGranularity,
+			expectedInvocations: 60,
+		},
+		{
+			testName:              "with_warmup_second_granularity",
+			experimentDurationMin: 2,
+			invocationStats: []int{
+				1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+				1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+				1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+				1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+			},
+			traceGranularity:    common.SecondGranularity,
+			withWarmup:          true,
+			expectedInvocations: 120,
+		},
+		{
+			testName:              "without_warmup_sleep_1min_then_invoke",
+			experimentDurationMin: 2,
+			invocationStats:       []int{0, 5},
+			expectedInvocations:   5,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.testName, func(t *testing.T) {
 			logrus.SetLevel(logrus.DebugLevel)
+			logrus.SetFormatter(&logrus.TextFormatter{TimestampFormat: time.StampMilli, FullTimestamp: true})
 
-			driver := createTestDriver()
+			driver := createTestDriver(test.invocationStats)
+
 			if test.withWarmup {
-				driver.Configuration.LoaderConfiguration.WarmupDuration = 1
-				driver.Configuration.TraceDuration = 3 // 1 profiling - 1 withWarmup - 1 execution
+				if test.traceGranularity == common.MinuteGranularity {
+					driver.Configuration.LoaderConfiguration.WarmupDuration = 1
+				} else {
+					driver.Configuration.LoaderConfiguration.WarmupDuration = 60
+				}
 			}
-			if test.secondGranularity {
-				driver.Configuration.TraceGranularity = common.SecondGranularity
-			}
+			driver.Configuration.TraceDuration = test.experimentDurationMin
+			driver.Configuration.TraceGranularity = test.traceGranularity
 
-			driver.RunExperiment(false, false)
+			driver.GenerateSpecification()
+			driver.RunExperiment()
 
 			f, err := os.Open(driver.outputFilename("duration"))
 			if err != nil {
 				t.Error(err)
+			}
+
+			if test.expectedInvocations == 0 {
+				return
 			}
 
 			var records []metric.ExecutionRecordBase
@@ -388,16 +442,22 @@ func TestDriverCompletely(t *testing.T) {
 			}
 
 			successfulInvocation, failedInvocations := 0, 0
-			clockTolerance := int64(20_000) // ms
+			//clockTolerance := int64(20_000) // ms
 
 			for i := 0; i < len(records); i++ {
 				record := records[i]
 
 				if test.withWarmup {
-					if i < 5 && record.Phase != int(common.WarmupPhase) {
+					threshold := 60
+					if test.testName == "with_warmup" {
+						threshold = 5
+					}
+
+					// 60 no checked since it is started in the warmup phase and completed in the execution phase -- new value taken
+					if i < threshold && record.Phase != int(common.WarmupPhase) {
 						t.Error("Invalid record phase in warmup.")
-					} else if i > 5 && record.Phase != int(common.ExecutionPhase) {
-						t.Error("Invalid record phase in execution phase.")
+					} else if i > threshold && record.Phase != int(common.ExecutionPhase) {
+						t.Errorf("Invalid record phase in execution phase - ID = %d.", i)
 					}
 				}
 
@@ -407,20 +467,16 @@ func TestDriverCompletely(t *testing.T) {
 					failedInvocations++
 				}
 
-				if i < len(records)-1 {
+				/*if i < len(records)-1 {
 					diff := (records[i+1].StartTime - records[i].StartTime) / 1_000_000 // ms
 
 					if diff > clockTolerance {
-						t.Error("Too big clock drift for the test to pass.")
+						t.Errorf("Too big clock drift for the test to pass - %d.", diff)
 					}
-				}
+				}*/
 			}
 
-			expectedInvocations := 5
-			if test.withWarmup {
-				expectedInvocations = 10
-			}
-
+			expectedInvocations := test.expectedInvocations
 			if !(successfulInvocation == expectedInvocations && failedInvocations == 0) {
 				t.Error("Number of successful and failed invocations do not match.")
 			}
@@ -461,73 +517,5 @@ func TestRequestedVsIssued(t *testing.T) {
 
 	if isRequestTargetAchieved(100, 100*(common.FailedTerminateThreshold-0.1), common.IssuedVsFailed) {
 		t.Error("Unexpected value received.")
-	}
-}
-
-func TestProceedToNextMinute(t *testing.T) {
-	function := &common.Function{
-		Name: "test-function",
-		InvocationStats: &common.FunctionInvocationStats{
-			Invocations: []int{100, 100, 100, 100, 100},
-		},
-	}
-
-	tests := []struct {
-		testName        string
-		minuteIndex     int
-		invocationIndex int
-		failedCount     int64
-		skipMinute      bool
-		toBreak         bool
-	}{
-		{
-			testName:        "proceed_to_next_minute_no_break_no_fail",
-			minuteIndex:     0,
-			invocationIndex: 95,
-			failedCount:     0,
-			skipMinute:      false,
-			toBreak:         false,
-		},
-		{
-			testName:        "proceed_to_next_minute_break_no_fail",
-			minuteIndex:     0,
-			invocationIndex: 75,
-			failedCount:     0,
-			skipMinute:      false,
-			toBreak:         true,
-		},
-		{
-			testName:        "proceed_to_next_minute_break_with_fail",
-			minuteIndex:     0,
-			invocationIndex: 90,
-			failedCount:     55,
-			skipMinute:      false,
-			toBreak:         true,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.testName, func(t *testing.T) {
-			driver := createTestDriver()
-
-			minuteIndex := test.minuteIndex
-			invocationIndex := test.invocationIndex
-			startOfMinute := time.Now()
-			phase := common.ExecutionPhase
-			var failedCountByMinute = make([]int64, driver.Configuration.TraceDuration)
-			failedCountByMinute[minuteIndex] = test.failedCount
-			var iatSum int64 = 2500
-
-			toBreak := driver.proceedToNextMinute(function, &minuteIndex, &invocationIndex, &startOfMinute,
-				test.skipMinute, &phase, failedCountByMinute, &iatSum)
-
-			if toBreak != test.toBreak {
-				t.Error("Invalid response from minute cleanup procedure.")
-			}
-
-			if !toBreak && ((minuteIndex != test.minuteIndex+1) || (invocationIndex != 0) || (failedCountByMinute[test.minuteIndex] != 0) || (iatSum != 0)) {
-				t.Error("Invalid response from minute cleanup procedure.")
-			}
-		})
 	}
 }

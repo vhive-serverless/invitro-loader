@@ -27,14 +27,17 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
+	"time"
+
+	"github.com/vhive-serverless/loader/pkg/generator"
+
+	"golang.org/x/exp/slices"
+
 	"github.com/vhive-serverless/loader/pkg/common"
 	"github.com/vhive-serverless/loader/pkg/config"
 	"github.com/vhive-serverless/loader/pkg/driver"
 	"github.com/vhive-serverless/loader/pkg/trace"
-	"golang.org/x/exp/slices"
-	"os"
-	"strings"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 	tracer "github.com/vhive-serverless/vSwarm/utils/tracing/go"
@@ -45,11 +48,12 @@ const (
 )
 
 var (
-	configPath    = flag.String("config", "config_knative_trace.json", "Path to loader configuration file")
-	failurePath   = flag.String("failureConfig", "failure.json", "Path to the failure configuration file")
+	configPath    = flag.String("config", "cmd/config_knative_trace.json", "Path to loader configuration file")
+	failurePath   = flag.String("failureConfig", "cmd/failure.json", "Path to the failure configuration file")
 	verbosity     = flag.String("verbosity", "info", "Logging verbosity - choose from [info, debug, trace]")
-	iatGeneration = flag.Bool("iatGeneration", false, "Generate iats only or run invocations as well")
+	iatGeneration = flag.Bool("iatGeneration", false, "Generate IATs only or run invocations as well")
 	iatFromFile   = flag.Bool("generated", false, "True if iats were already generated")
+	dryRun        = flag.Bool("dryRun", false, "Dry run mode - do not deploy functions or generate invocations")
 )
 
 func init() {
@@ -88,14 +92,9 @@ func main() {
 
 	supportedPlatforms := []string{
 		"Knative",
-		"Knative-RPS",
 		"OpenWhisk",
-		"OpenWhisk-RPS",
 		"AWSLambda",
-		"AWSLambda-RPS",
 		"Dirigent",
-		"Dirigent-RPS",
-		"Dirigent-Dandelion-RPS",
 		"Dirigent-Dandelion",
 	}
 
@@ -103,10 +102,14 @@ func main() {
 		log.Fatal("Unsupported platform!")
 	}
 
-	if !strings.HasSuffix(cfg.Platform, "-RPS") {
-		runTraceMode(&cfg, *iatFromFile, *iatGeneration)
+	if cfg.Platform == "Knative" {
+		common.CheckCPULimit(cfg.CPULimit)
+	}
+
+	if cfg.TracePath == "RPS" {
+		runRPSMode(&cfg, *iatFromFile, *iatGeneration)
 	} else {
-		runRPSMode(&cfg, *iatGeneration)
+		runTraceMode(&cfg, *iatFromFile, *iatGeneration)
 	}
 }
 
@@ -114,7 +117,6 @@ func determineDurationToParse(runtimeDuration int, warmupDuration int) int {
 	result := 0
 
 	if warmupDuration > 0 {
-		result += 1              // profiling
 		result += warmupDuration // warmup
 	}
 
@@ -149,7 +151,7 @@ func parseYAMLSpecification(cfg *config.LoaderConfiguration) string {
 	case "firecracker":
 		return "workloads/firecracker/trace_func_go.yaml"
 	default:
-		if cfg.Platform != "Dirigent" && cfg.Platform != "Dirigent-RPS" && cfg.Platform != "Dirigent-Dandelion-RPS" && cfg.Platform != "Dirigent-Dandelion" {
+		if cfg.Platform != "Dirigent" && cfg.Platform != "Dirigent-Dandelion" {
 			log.Fatal("Invalid 'YAMLSelector' parameter.")
 		}
 	}
@@ -170,12 +172,17 @@ func parseTraceGranularity(cfg *config.LoaderConfiguration) common.TraceGranular
 	return common.MinuteGranularity
 }
 
-func runTraceMode(cfg *config.LoaderConfiguration, readIATFromFile bool, justGenerateIAT bool) {
+func runTraceMode(cfg *config.LoaderConfiguration, readIATFromFile bool, writeIATsToFile bool) {
 	durationToParse := determineDurationToParse(cfg.ExperimentDuration, cfg.WarmupDuration)
 	yamlPath := parseYAMLSpecification(cfg)
 
+	// Azure trace parsing
 	traceParser := trace.NewAzureParser(cfg.TracePath, durationToParse)
-	functions := traceParser.Parse(cfg.Platform)
+	functions := traceParser.Parse()
+
+	// Dirigent metadata parsing
+	dirigentMetadataParser := trace.NewDirigentMetadataParser(cfg.TracePath, functions, yamlPath, cfg.Platform)
+	dirigentMetadataParser.Parse()
 
 	log.Infof("Traces contain the following %d functions:\n", len(functions))
 	for _, function := range functions {
@@ -199,11 +206,44 @@ func runTraceMode(cfg *config.LoaderConfiguration, readIATFromFile bool, justGen
 		Functions: functions,
 	})
 
+	// Skip experiments execution during dry run mode
+	if *dryRun {
+		return
+	}
+
 	log.Infof("Using %s as a service YAML specification file.\n", experimentDriver.Configuration.YAMLPath)
 
-	experimentDriver.RunExperiment(justGenerateIAT, readIATFromFile)
+	experimentDriver.GenerateSpecification()
+	experimentDriver.ReadOrWriteFileSpecification(writeIATsToFile, readIATFromFile)
+	experimentDriver.RunExperiment()
 }
 
-func runRPSMode(cfg *config.LoaderConfiguration, justGenerateIAT bool) {
-	panic("Not yet implemented")
+func runRPSMode(cfg *config.LoaderConfiguration, readIATFromFile bool, writeIATsToFile bool) {
+	experimentDuration := determineDurationToParse(cfg.ExperimentDuration, cfg.WarmupDuration)
+
+	rpsTarget := cfg.RpsTarget
+	coldStartPercentage := cfg.RpsColdStartRatioPercentage
+
+	warmStartRPS := rpsTarget * (100 - coldStartPercentage) / 100
+	coldStartRPS := rpsTarget * coldStartPercentage / 100
+
+	warmFunction, warmStartCount := generator.GenerateWarmStartFunction(experimentDuration, warmStartRPS)
+	coldFunctions, coldStartCount := generator.GenerateColdStartFunctions(experimentDuration, coldStartRPS, cfg.RpsCooldownSeconds)
+
+	experimentDriver := driver.NewDriver(&config.Configuration{
+		LoaderConfiguration: cfg,
+		TraceDuration:       experimentDuration,
+
+		YAMLPath: parseYAMLSpecification(cfg),
+
+		Functions: generator.CreateRPSFunctions(cfg, warmFunction, warmStartCount, coldFunctions, coldStartCount),
+	})
+
+	// Skip experiments execution during dry run mode
+	if *dryRun {
+		return
+	}
+
+	experimentDriver.ReadOrWriteFileSpecification(writeIATsToFile, readIATFromFile)
+	experimentDriver.RunExperiment()
 }

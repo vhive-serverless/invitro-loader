@@ -5,8 +5,12 @@
   "InvokeProtocol" : "http2",
   "EndpointPort": 80,
 
-  "DirigentControlPlaneIP": "10.0.1.253:9092",
+  "DirigentControlPlaneIP": "10.0.1.253:9091",
   "BusyLoopOnSandboxStartup": false,
+
+  "AsyncMode": false,
+  "AsyncResponseURL": "10.0.1.253:8082",
+  "AsyncWaitToCollectMin": 1,
 
   "TracePath": "data/traces/example",
   "Granularity": "minute",
@@ -15,6 +19,7 @@
   "CPULimit": "1vCPU",
   "ExperimentDuration": 30,
   "WarmupDuration": 0,
+  "PrepullMode": "",
 
   "IsPartiallyPanic": false,
   "EnableZipkinTracing": false,
