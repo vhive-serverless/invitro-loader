@@ -4,12 +4,12 @@ import json
 import re
 import argparse
 import pandas as pd
-import matplotlib.pyplot as plt
 from find_proxy_function import *
 
 from log_config import *
 
 INVOCATION_COLUMN = 4
+VSWARM_MAX_DUR = 27000
 
 def load_trace(trace_directorypath):
     duration_info = {}
@@ -27,6 +27,9 @@ def load_trace(trace_directorypath):
                 f"Durations file {duration_filepath} cannot be read. Error: {e}"
             )
             return None, -1
+    else:
+        log.critical(f"Durations file {duration_filepath} not found")
+        return None, -1
 
     # Read the memory file
     memory_filepath = trace_directorypath + "/memory.csv"
@@ -39,6 +42,9 @@ def load_trace(trace_directorypath):
                 f"Memory file {memory_filepath} cannot be read. Error: {e}"
             )
             return None, -1
+    else:
+        log.critical(f"Memory file {memory_filepath} not found")
+        return None, -1
         
     # Rename all columns in the dataframe with a lambda (for example: percentile_Average_1 -> 1-percentile) if x matches a regex
     duration_info = duration_info.rename(columns=lambda x: re.sub(r'percentile_(\w+)_(\d+)', r'\2-' + "percentile", x))
@@ -59,52 +65,9 @@ def load_trace(trace_directorypath):
 
     return trace_functions, 0
 
-def generate_plot(trace_directorypath, profile_filepath, output_filepath, invoke=True):
-    trace_functions, err = load_trace(trace_directorypath)
-    if err == -1:
-        log.critical(f"Load Generation failed")
-        return
-    elif err == 0:
-        log.info(f"Trace loaded")
-
-    ## Check whether the profile file for proxy functions exists or not
-    if os.path.exists(profile_filepath):
-        log.info(
-            f"Profile file for proxy functions {profile_filepath} exists. Accessing information"
-        )
-        try:
-            with open(profile_filepath, "r") as jf:
-                proxy_functions = json.load(jf)
-        except Exception as e:
-            log.critical(
-                f"Profile file for proxy functions {profile_filepath} cannot be read. Error: {e}"
-            )
-            log.critical(f"Load Generation failed")
-            return
-    else:
-        log.critical(f"Profile file for proxy functions {profile_filepath} not found")
-        log.critical(f"Load Generation failed")
-        return
+def generate_plot(trace_directorypath, trace_functions, proxy_functions, mapped_trace, invocation_statistics=True):
     
-    if os.path.exists(output_filepath):
-        log.info(
-            f"Mapper output file for trace functions {output_filepath} exists. Accessing information"
-        )
-        try:
-            with open(output_filepath, "r") as jf:
-                mapped_traces = json.load(jf)
-        except Exception as e:
-            log.critical(
-                f"Mapper output file for trace functions {output_filepath} cannot be read. Error: {e}"
-            )
-            log.critical(f"Load Generation failed")
-            return
-    else:
-        log.critical(f"Mapper output file for trace functions {output_filepath} not found")
-        log.critical(f"Load Generation failed")
-        return
-    
-    if invoke:
+    if invocation_statistics:
         invocations = pd.read_csv(trace_directorypath+"/invocations.csv")
         inv_df = {}
         for i in range(len(invocations)):
@@ -115,12 +78,12 @@ def generate_plot(trace_directorypath, profile_filepath, output_filepath, invoke
         dropped_functions, dropped_invocations, total_invocations = 0, 0, 0
         for trace in trace_functions:
             duration = trace_functions[trace]["duration"]["50-percentile"]
-            if duration > 27000:
+            if duration > VSWARM_MAX_DUR:
                 dropped_functions += 1
                 dropped_invocations += inv_df[trace]
                 continue
             total_invocations += inv_df[trace]
-            proxy_name = mapped_traces[trace]["proxy-function"]
+            proxy_name = mapped_trace[trace]["proxy-function"]
             profile_duration = proxy_functions[proxy_name]["duration"]["50-percentile"]
             trace_durations.append(duration)
             mapped_durations.append(profile_duration)
@@ -130,9 +93,9 @@ def generate_plot(trace_directorypath, profile_filepath, output_filepath, invoke
         mapped_durations = []
         for trace in trace_functions:
             duration = trace_functions[trace]["duration"]["50-percentile"]
-            if duration > 27000:
+            if duration > VSWARM_MAX_DUR:
                 continue
-            proxy_name = mapped_traces[trace]["proxy-function"]
+            proxy_name = mapped_trace[trace]["proxy-function"]
             profile_duration = proxy_functions[proxy_name]["duration"]["50-percentile"]
             trace_durations.append(duration)
             mapped_durations.append(profile_duration)
@@ -161,7 +124,7 @@ def main():
     output_filepath = trace_directorypath + "/mapper_output.json"
     trace_functions, err = load_trace(trace_directorypath)
     if err == -1:
-        log.critical(f"Load Generation failed")
+        log.critical(f"Trace loading failed")
         return
     elif err == 0:
         log.info(f"Trace loaded")
@@ -186,15 +149,12 @@ def main():
         return
 
     # Getting a proxy function for every trace function
-    trace_functions, err = get_proxy_function(
+    trace_functions = get_closest_proxy_function(
         trace_functions=trace_functions,
         proxy_functions=proxy_functions,
     )
-    if err == -1:
-        log.critical(f"Load Generation failed")
-        return
-    elif err == 0:
-        log.info(f"Proxy functions obtained")
+    
+    log.info(f"Proxy functions obtained")
 
     # Writing the proxy functions to a file
 
@@ -240,12 +200,10 @@ def main():
         trace_dur = trace_functions[function]["duration"]["50-percentile"]
         proxy_dur = proxy_functions[mapper_output[function]["proxy-function"]]["duration"]["50-percentile"]
         proxy_mem = proxy_functions[mapper_output[function]["proxy-function"]]["memory"]["50-percentile"]
-        log.warning(f"Memory error for function {function} is {abs(trace_mem - proxy_mem)} MB per invocation")
         mem_error += trace_mem - proxy_mem
         rel_mem_error += (trace_mem - proxy_mem)/trace_mem
         abs_mem_error += abs(trace_mem - proxy_mem)
         abs_rel_mem_error += abs((trace_mem - proxy_mem)/trace_mem)
-        log.warning(f"Duration error for function {function} is {abs(trace_dur - proxy_dur)}ms per invocation")
         dur_error += trace_dur - proxy_dur
         abs_dur_error += abs(trace_dur - proxy_dur)
         if trace_dur == 0:
