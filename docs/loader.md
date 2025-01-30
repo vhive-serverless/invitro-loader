@@ -263,3 +263,42 @@ Note:
   - Under `Quota name`, select `Concurrent executions` and click `Request increase at account level` (Alternatively, click [here](https://us-east-1.console.aws.amazon.com/servicequotas/home/services/lambda/quotas/L-B99A9384))
   - Under `Increase quota value`, input `1000` and click `Request`
   - Await AWS Support Team to approve the request. The request may take several days or weeks to be approved.
+
+## Using Azure Functions
+
+**Pre-requisites:**
+1. Microsoft Azure account with an active subscription ID
+2. Go installed
+3. Python3 installed
+
+**Quick Setup for Azure Deployment:**
+1. Install the Azure CLI and verify installation:
+    ```bash
+    curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+    az --version
+    ```
+2. Log in as a user (Note: This will open a browser window to select Azure account):
+    ```bash
+    az login
+    ```
+3. Create an Azure Service Principal: 
+   ```bash
+   az ad sp create-for-rbac --name "InVitro" --role Contributor --scopes /subscriptions/<your-subscription-id>
+   ```
+4. Set the following environment values: 
+   ```bash
+   export AZURE_APP_ID=<appId>
+   export AZURE_PASSWORD=<password>
+   export AZURE_TENANT=<tenant>
+   ```
+5. Use the Service Principal credentials in order to run automated scripts without manual login: 
+   ```bash
+   az login --service-principal --username $AZURE_APP_ID --password $AZURE_PASSWORD --tenant $AZURE_TENANT
+   ```
+6. Start the Azure Functions deployment experiment:
+    ```bash
+    go run cmd/loader.go --config cmd/config_azure_trace.json
+    ```
+---
+Note:
+- Current deployment is via ZIP
