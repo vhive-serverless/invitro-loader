@@ -58,23 +58,28 @@ def get_closest_proxy_function(
         proxy_list.append(proxy_functions[function_name])
         proxy_functions[function_name]["index"] = len(proxy_list) - 1
 
-    for function_name in trace_functions:
+    for id in trace_functions:
         min_error = math.inf
         min_error_index = -1
         for i in range(0, len(proxy_list)):
-            error = get_error(trace_functions[function_name], proxy_list[i])
+            error = get_error(trace_functions[id], proxy_list[i])
             if error < min_error:
                 min_error = error
                 min_error_index = i
 
         if min_error == math.inf:
-            log.warning(f"Proxy function for function {function_name} not found. Using InVitro trace function.")
-            trace_functions[function_name]["proxy-function"] = "trace-func-go"
+            log.warning(f"Proxy function for unique id (HashFunction + HashOwner + HashApp) {id} not found. Using InVitro trace function.")
+            trace_functions[id]["proxy-function"] = "trace-func-go"
             continue
 
-        trace_functions[function_name]["proxy-function"] = proxy_list[
+        trace_functions[id]["proxy-function"] = proxy_list[
             min_error_index
         ]["name"]
+
+        if abs(trace_functions[id]["duration"]["50-percentile"] - proxy_functions[trace_functions[id]["proxy-function"]]["duration"]["50-percentile"]) > 0.4*trace_functions[id]["duration"]["50-percentile"]:
+            log.warning(f"Duration error for id {id} above 40%. Using InVitro trace function.")
+            trace_functions[id]["proxy-function"] = "trace-func-go"
+            continue
 
     for function_name in proxy_functions:
         del proxy_functions[function_name]["index"]
