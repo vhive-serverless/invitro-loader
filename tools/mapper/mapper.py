@@ -55,51 +55,15 @@ def load_trace(trace_directorypath):
     trace_functions = {}
 
     for _, row in duration_info.iterrows():
-        hash_function = row["HashFunction"]
-        trace_functions[hash_function] = {}
-        trace_functions[hash_function]["duration"] = row
+        unique_id = row["HashFunction"] + row["HashOwner"] + row["HashApp"]
+        trace_functions[unique_id] = {}
+        trace_functions[unique_id]["duration"] = row
 
     for _, row in memory_info.iterrows():
-        hash_function = row["HashFunction"]
-        trace_functions[hash_function]["memory"] = row
+        unique_id = row["HashFunction"] + row["HashOwner"] + row["HashApp"]
+        trace_functions[unique_id]["memory"] = row
 
     return trace_functions, 0
-
-def generate_plot(trace_directorypath, trace_functions, proxy_functions, mapped_trace, invocation_statistics=True):
-    
-    if invocation_statistics:
-        invocations = pd.read_csv(trace_directorypath+"/invocations.csv")
-        inv_df = {}
-        for i in range(len(invocations)):
-            inv_df[invocations["HashFunction"][i]] = sum([invocations[col][i] if col not in invocations.columns[0:INVOCATION_COLUMN] else 0 for col in invocations.columns])
-        
-        trace_durations = []
-        mapped_durations = []
-        dropped_functions, dropped_invocations, total_invocations = 0, 0, 0
-        for trace in trace_functions:
-            duration = trace_functions[trace]["duration"]["50-percentile"]
-            if duration > VSWARM_MAX_DUR:
-                dropped_functions += 1
-                dropped_invocations += inv_df[trace]
-                continue
-            total_invocations += inv_df[trace]
-            proxy_name = mapped_trace[trace]["proxy-function"]
-            profile_duration = proxy_functions[proxy_name]["duration"]["50-percentile"]
-            trace_durations.append(duration)
-            mapped_durations.append(profile_duration)
-        return trace_durations, mapped_durations, dropped_functions, (dropped_invocations/total_invocations)*100
-    else:
-        trace_durations = []
-        mapped_durations = []
-        for trace in trace_functions:
-            duration = trace_functions[trace]["duration"]["50-percentile"]
-            if duration > VSWARM_MAX_DUR:
-                continue
-            proxy_name = mapped_trace[trace]["proxy-function"]
-            profile_duration = proxy_functions[proxy_name]["duration"]["50-percentile"]
-            trace_durations.append(duration)
-            mapped_durations.append(profile_duration)
-        return trace_durations, mapped_durations
 
 def main():
     # Parse the arguments
@@ -160,9 +124,9 @@ def main():
 
     # Only give function name and proxy name
     trace_json = {}
-    for function in trace_functions:
-        trace_json[function] = {}
-        trace_json[function]["proxy-function"] = trace_functions[function]["proxy-function"] 
+    for id in trace_functions:
+        trace_json[id] = {}
+        trace_json[id]["proxy-function"] = trace_functions[id]["proxy-function"] 
 
     try:
         with open(output_filepath, "w") as jf:
@@ -173,15 +137,7 @@ def main():
         return
     
     log.info(f"Output file {output_filepath} written")
-    log.info(f"Preliminary load Generation successful. Checking error levels in mapping...")
-
-    # Read the mapper output
-    try:
-        with open(output_filepath, "r") as jf:
-            mapper_output = json.load(jf)
-    except Exception as e:
-        log.critical(f"Error in loading mapper output file {e}")
-        return
+    log.info(f"Load Generation successful. Mapper output generated.")
 
     # Check the memory and duration errors
 
@@ -195,11 +151,14 @@ def main():
     abs_rel_mem_error = 0
     abs_rel_dur_error = 0
     zero_duration = 0
-    for function in mapper_output:
-        trace_mem = trace_functions[function]["memory"]["50-percentile"]
-        trace_dur = trace_functions[function]["duration"]["50-percentile"]
-        proxy_dur = proxy_functions[mapper_output[function]["proxy-function"]]["duration"]["50-percentile"]
-        proxy_mem = proxy_functions[mapper_output[function]["proxy-function"]]["memory"]["50-percentile"]
+    for id in trace_functions:
+        if trace_functions[id]["proxy-function"] == "trace-func-go":
+            dur_count += 1
+            continue
+        trace_mem = trace_functions[id]["memory"]["50-percentile"]
+        trace_dur = trace_functions[id]["duration"]["50-percentile"]
+        proxy_dur = proxy_functions[trace_functions[id]["proxy-function"]]["duration"]["50-percentile"]
+        proxy_mem = proxy_functions[trace_functions[id]["proxy-function"]]["memory"]["50-percentile"]
         mem_error += trace_mem - proxy_mem
         rel_mem_error += (trace_mem - proxy_mem)/trace_mem
         abs_mem_error += abs(trace_mem - proxy_mem)
@@ -211,11 +170,8 @@ def main():
         else:
             rel_dur_error += (trace_dur - proxy_dur)/trace_dur
             abs_rel_dur_error += abs((trace_dur - proxy_dur)/trace_dur)
-        if abs(trace_dur - proxy_dur) > 0.4*trace_dur:
-            mapper_output[function]["proxy-function"] = "trace-func-go"
-            dur_count += 1
 
-    total_functions = len(mapper_output)
+    total_functions = len(trace_functions)
     log.info(f"Average memory error: {mem_error/total_functions} MB per invocation")
     log.info(f"Average duration error: {dur_error/total_functions} ms per invocation")
     log.info(f"Average absolute memory error: {abs_mem_error/total_functions} MB per invocation")
@@ -226,19 +182,6 @@ def main():
     log.info(f"Average absolute relative duration error: {abs_rel_dur_error/total_functions}")
     log.info(f"Duration errors: {dur_count}")
     log.info(f"Functions with 0 duration: {zero_duration}")
-
-    log.info(f"Replacing the functions with high duration error with invitro functions.")
-
-    ## Write the updated mapper output
-
-    try:
-        with open(output_filepath, "w") as jf:
-            json.dump(mapper_output, jf, indent=4)
-            log.info(f"Updated output file {output_filepath} written. Load generated.")
-    except Exception as e:
-        log.critical(f"Output file {output_filepath} cannot be written. Error: {e}")
-        log.critical(f"Load Generation failed")
-        return
 
 if __name__ == "__main__":
     main()
