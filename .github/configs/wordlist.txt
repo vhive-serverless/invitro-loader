@@ -797,3 +797,5 @@ TracesDir
 TracesFormat
 baseLoaderConfig
 iats
+SweepOptions
+SweepType
