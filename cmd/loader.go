@@ -28,6 +28,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/vhive-serverless/loader/pkg/generator"
@@ -96,6 +97,7 @@ func main() {
 		"AWSLambda",
 		"Dirigent",
 		"Dirigent-Dandelion",
+		"Dirigent-Dandelion-Workflow",
 	}
 
 	if !slices.Contains(supportedPlatforms, cfg.Platform) {
@@ -151,7 +153,9 @@ func parseYAMLSpecification(cfg *config.LoaderConfiguration) string {
 	case "firecracker":
 		return "workloads/firecracker/trace_func_go.yaml"
 	default:
-		if cfg.Platform != "Dirigent" && cfg.Platform != "Dirigent-Dandelion" {
+		platform := strings.ToLower(cfg.Platform)
+		validPlatforms := []string{"dirigent", "dirigent-dandelion", "dirigent-dandelion-workflow"}
+		if !slices.Contains(validPlatforms, platform) {
 			log.Fatal("Invalid 'YAMLSelector' parameter.")
 		}
 	}
